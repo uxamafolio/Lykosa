@@ -31,14 +31,20 @@
   },
   "include": [
     "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "prisma/**/*.ts",
+    "scripts/**/*.ts",
+    "next.config.ts",
+    "tailwind.config.ts",
+    "postcss.config.mjs",
+    "eslint.config.mjs",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",
-    "examples",
+    "examples/**",
     ".next",
     "out",
     "build"
