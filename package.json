@@ -1,15 +1,22 @@
 {
-  "name": "nextjs_tailwind_shadcn_ts",
+  "name": "lykosa",
   "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
+    "build": "prisma generate && next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
+    "start": "NODE_ENV=production bun .next/standalone/server.js",
+    "worker:hunter": "bun mini-services/dubizzle-monitor/index.ts",
+    "worker:hunter:once": "bun scripts/hunter-once.ts",
+    "zai:config": "bun scripts/write-zai-config.ts",
     "lint": "eslint .",
     "db:push": "prisma db push",
+    "db:push:direct": "bun scripts/prisma-direct.ts db push",
     "db:generate": "prisma generate",
+    "db:deploy": "prisma migrate deploy",
+    "db:deploy:direct": "bun scripts/prisma-direct.ts migrate deploy",
     "db:migrate": "prisma migrate dev",
+    "db:migrate:direct": "bun scripts/prisma-direct.ts migrate dev",
     "db:reset": "prisma migrate reset"
   },
   "dependencies": {

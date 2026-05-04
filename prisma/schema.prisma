@@ -1,7 +1,8 @@
 // ═══════════════════════════════════════════════════════════════
 // Lykosa — AI-Powered Real Estate Lead Hunter
 // Data Models per PRD v2.1, Section 5.3
-// Adapted for SQLite (cuid instead of uuid, JSON string for arrays)
+// PostgreSQL deployment target for Supabase.
+// blacklistKeywords stays JSON-encoded so the app can keep one portable shape.
 // ═══════════════════════════════════════════════════════════════
 
 generator client {
@@ -9,8 +10,9 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // ─── User ─────────────────────────────────────────────────────
@@ -46,7 +48,6 @@ model Listing {
 }
 
 // ─── AdminSetting ─────────────────────────────────────────────
-// SQLite doesn't support String[] natively.
 // blacklistKeywords is stored as a JSON string, e.g. '["agent","broker"]'
 model AdminSetting {
   id                String  @id @default(cuid())

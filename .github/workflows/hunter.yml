@@ -1,0 +1,44 @@
+name: Hunter
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+concurrency:
+  group: hunter
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      DIRECT_URL: ${{ secrets.DIRECT_URL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      ZAI_BASE_URL: ${{ secrets.ZAI_BASE_URL }}
+      ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+      ZAI_CHAT_ID: ${{ secrets.ZAI_CHAT_ID }}
+      ZAI_USER_ID: ${{ secrets.ZAI_USER_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: bun run db:generate
+
+      - name: Write Z AI config
+        run: bun run zai:config
+
+      - name: Run one hunter cycle
+        run: bun run worker:hunter:once

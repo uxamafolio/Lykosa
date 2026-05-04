@@ -94,6 +94,7 @@ interface HunterStatus {
     latencyMs: number;
     ranAt: string;
   } | null;
+  lastListingAt?: string | null;
   nextCycle: string | null;
   uptime: { totalCycles: number; totalNewListings: number };
 }
@@ -202,9 +203,16 @@ export default function LykosaDashboard() {
   const fetchData = useCallback(async () => {
     try {
       const [listingsRes, settingsRes, hunterRes] = await Promise.allSettled([
-        fetch(
-          `/api/listings?status=${statusFilter === "all" ? "" : statusFilter}&search=${searchQuery}&agentScoreMin=${scoreRange[0]}&agentScoreMax=${scoreRange[1]}&page=${currentPage}&limit=${PAGE_SIZE}&sortBy=createdAt&sortOrder=desc`
-        ),
+        fetch(`/api/listings?${new URLSearchParams({
+          status: statusFilter === "all" ? "" : statusFilter,
+          search: searchQuery,
+          agentScoreMin: String(scoreRange[0]),
+          agentScoreMax: String(scoreRange[1]),
+          page: String(currentPage),
+          limit: String(PAGE_SIZE),
+          sortBy: "createdAt",
+          sortOrder: "desc",
+        })}`),
         fetch("/api/admin-settings"),
         fetch("/api/hunter"),
       ]);
@@ -331,10 +339,10 @@ export default function LykosaDashboard() {
           </nav>
 
           <div className="flex items-center gap-3">
-            {hunterStatus?.status === "running" && (
+            {(hunterStatus?.status === "running" || hunterStatus?.status === "scheduled") && (
               <Badge className="bg-green-500/15 text-green-400 border-green-500/30">
                 <span className="mr-1.5 h-2 w-2 rounded-full bg-green-400 animate-pulse inline-block" />
-                Hunter Live
+                {hunterStatus.status === "scheduled" ? "Hunter Scheduled" : "Hunter Live"}
               </Badge>
             )}
             <Button
@@ -464,7 +472,9 @@ export default function LykosaDashboard() {
           <span>
             {hunterStatus?.status === "running"
               ? `🟢 Hunter Active — Cycle #${hunterStatus.uptime?.totalCycles ?? 0}`
-              : "⚫ Hunter Offline"}
+              : hunterStatus?.status === "scheduled"
+                ? "🟢 Hunter Scheduled — GitHub Actions"
+                : "⚫ Hunter Offline"}
           </span>
         </div>
       </footer>
@@ -1008,6 +1018,7 @@ function HunterTab({ status, onEnrich, enriching }: { status: HunterStatus | nul
   }
 
   const isRunning = status.status === "running";
+  const isScheduled = status.status === "scheduled";
 
   return (
     <div className="space-y-6">
@@ -1026,11 +1037,11 @@ function HunterTab({ status, onEnrich, enriching }: { status: HunterStatus | nul
               <div className="flex items-center gap-2">
                 <span
                   className={`h-2.5 w-2.5 rounded-full ${
-                    isRunning ? "bg-green-400 animate-pulse" : "bg-red-400"
+                    isRunning || isScheduled ? "bg-green-400 animate-pulse" : "bg-red-400"
                   }`}
                 />
                 <span className="text-sm font-medium">
-                  {isRunning ? "Running" : "Offline"}
+                  {isRunning ? "Running" : isScheduled ? "Scheduled" : "Offline"}
                 </span>
               </div>
             </div>
@@ -1047,7 +1058,9 @@ function HunterTab({ status, onEnrich, enriching }: { status: HunterStatus | nul
             <div className="space-y-1">
               <p className="text-xs text-muted-foreground">Next Cycle</p>
               <p className="text-sm font-medium">
-                {status.nextCycle
+                {isScheduled
+                  ? `Every ${status.config?.scrapeIntervalMin ?? 15}m`
+                  : status.nextCycle
                   ? timeAgo(status.nextCycle) === "just now"
                     ? "Now"
                     : `in ${Math.max(0, Math.round((new Date(status.nextCycle).getTime() - Date.now()) / 60_000))}m`
@@ -1067,7 +1080,14 @@ function HunterTab({ status, onEnrich, enriching }: { status: HunterStatus | nul
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {status.lastCycle ? (
+          {isScheduled ? (
+            <p className="text-sm text-muted-foreground">
+              GitHub Actions runs the hunter on schedule.
+              {status.lastListingAt
+                ? ` Latest saved lead was ${timeAgo(status.lastListingAt)}.`
+                : " No listings have been saved yet."}
+            </p>
+          ) : status.lastCycle ? (
             <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
               <div className="space-y-1">
                 <p className="text-xs text-muted-foreground">Cycle #</p>

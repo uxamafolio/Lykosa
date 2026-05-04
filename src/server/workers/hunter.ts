@@ -48,6 +48,18 @@ export interface HunterResult {
   errors: string[];
 }
 
+function parseBlacklistKeywords(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 // ─── Jitter Logic (PRD §4.1 — Adaptive Cron with Jitter) ─────
 
 /**
@@ -241,9 +253,7 @@ export async function processWithBrain(
   rawListings: RawListing[],
   adminSettings: AdminSetting | null
 ): Promise<BrainResult> {
-  const blacklist: string[] = adminSettings
-    ? JSON.parse(adminSettings.blacklistKeywords || "[]")
-    : [];
+  const blacklist = parseBlacklistKeywords(adminSettings?.blacklistKeywords);
   const agentThreshold = adminSettings?.agentThreshold ?? 60;
 
   const verified: RawListing[] = [];
@@ -415,14 +425,14 @@ export async function notifyListings(
   config: HunterConfig,
   notifyMode: string,
   agentThreshold: number
-): Promise<void> {
+): Promise<string[]> {
   // Filter based on Shadow Mode
   const toNotify =
     notifyMode === "VERIFIED_ONLY"
       ? listings.filter((l) => l.agentScore < agentThreshold)
       : listings;
 
-  if (toNotify.length === 0) return;
+  if (toNotify.length === 0) return [];
 
   // Build message
   if (toNotify.length === 1) {
@@ -431,7 +441,7 @@ export async function notifyListings(
       l.agentScore <= 30 ? "🟢" : l.agentScore <= 60 ? "🟡" : "🔴";
     const latencyBadge = l.leadLatency !== null ? `Detected in ${l.leadLatency}s` : "";
 
-    await sendTelegram(
+    const sent = await sendTelegram(
       config.telegramBotToken,
       config.telegramChatId,
       `🏠 <b>New Lead Detected!</b>\n\n` +
@@ -444,12 +454,12 @@ export async function notifyListings(
         `${latencyBadge ? `⚡ ${latencyBadge}\n` : ""}` +
         `\n⏰ ${new Date().toLocaleString("en-AE", { timeZone: "Asia/Dubai" })}`
     );
-    return;
+    return sent ? [l.id] : [];
   }
 
   // Batch message
-  const lines = toNotify
-    .slice(0, 10) // Telegram message limit
+  const batch = toNotify.slice(0, 10); // Telegram message limit
+  const lines = batch
     .map((l, i) => {
       const scoreEmoji =
         l.agentScore <= 30 ? "🟢" : l.agentScore <= 60 ? "🟡" : "🔴";
@@ -457,13 +467,14 @@ export async function notifyListings(
     })
     .join("\n");
 
-  await sendTelegram(
+  const sent = await sendTelegram(
     config.telegramBotToken,
     config.telegramChatId,
     `🏠 <b>${toNotify.length} New Leads!</b>\n\n` +
       lines +
       `\n\n⏰ ${new Date().toLocaleString("en-AE", { timeZone: "Asia/Dubai" })}`
   );
+  return sent ? batch.map((l) => l.id) : [];
 }
 
 // ─── Scraping: Web Search Fallback ───────────────────────────
@@ -608,7 +619,8 @@ let cycleNumber = 0;
  */
 export async function runHunterCycle(
   db: PrismaClient,
-  config: HunterConfig
+  config: HunterConfig,
+  options: { enrich?: boolean; jitter?: boolean } = {}
 ): Promise<HunterResult> {
   cycleNumber++;
   const startedAt = new Date();
@@ -621,7 +633,7 @@ export async function runHunterCycle(
   );
 
   // Step 1: Apply Jitter (PRD §4.1)
-  const jitterDelayMs = await applyJitter();
+  const jitterDelayMs = options.jitter === false ? 0 : await applyJitter();
 
   // Step 2: Scrape Listings
   let rawListings: RawListing[] = [];
@@ -658,9 +670,7 @@ export async function runHunterCycle(
   );
 
   // Step 4: Calculate Agent Scores for verified listings
-  const blacklist: string[] = adminSettings
-    ? JSON.parse(adminSettings.blacklistKeywords || "[]")
-    : [];
+  const blacklist = parseBlacklistKeywords(adminSettings?.blacklistKeywords);
   const agentScores = new Map<string, number>();
 
   for (const listing of brainResult.verified) {
@@ -689,24 +699,28 @@ export async function runHunterCycle(
       leadLatency: calculateLeadLatency(l.createdAt, l.sourceListedAt),
     }));
 
-    await notifyListings(
+    const notifiedIds = await notifyListings(
       listingsWithLatency,
       config,
       adminSettings?.notifyMode ?? "ALL",
       adminSettings?.agentThreshold ?? 60
     );
 
-    // Mark as SENT
-    await db.listing.updateMany({
-      where: { id: { in: newListingsFromDb.map((l) => l.id) } },
-      data: { status: "SENT" },
-    });
+    // Only mark listings as SENT after Telegram confirms delivery.
+    if (notifiedIds.length > 0) {
+      await db.listing.updateMany({
+        where: { id: { in: notifiedIds } },
+        data: { status: "SENT" },
+      });
+    }
   }
 
-  // Step 7: Enrich top leads with phone/price via page_reader (async, non-blocking)
-  enrichTopLeads(db, brainResult.verified, agentScores).catch((err) => {
-    console.error("  ⚠️  Enrichment error (non-fatal):", (err as Error).message);
-  });
+  // Step 7: Enrich top leads with phone/price via web_search + LLM.
+  if (options.enrich !== false) {
+    enrichTopLeads(db, brainResult.verified, agentScores).catch((err) => {
+      console.error("  ⚠️  Enrichment error (non-fatal):", (err as Error).message);
+    });
+  }
 
   const elapsed = ((Date.now() - startedAt.getTime()) / 1_000).toFixed(1);
   console.log(`  📊 Cycle #${cycleNumber} complete in ${elapsed}s`);

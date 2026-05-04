@@ -51,4 +51,9 @@ prompt
 
 server.log
 # Skills directory
-/skills/
+/skills/.env
+node_modules
+.z-ai-config
+.env
+node_modules
+.z-ai-config

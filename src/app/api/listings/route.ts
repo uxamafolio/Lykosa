@@ -5,6 +5,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
+const VALID_STATUSES = new Set(["NEW", "SENT", "IGNORED"]);
+const VALID_SORT_FIELDS = new Set([
+  "createdAt",
+  "updatedAt",
+  "price",
+  "agentScore",
+  "title",
+  "status",
+]);
+
+function parseBoundedInt(value: string | null, fallback: number, min: number, max: number) {
+  const parsed = Number.parseInt(value || "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -12,20 +28,23 @@ export async function GET(req: NextRequest) {
     // Filters
     const status = searchParams.get("status"); // "NEW" | "SENT" | "IGNORED"
     const search = searchParams.get("search");
-    const agentScoreMin = parseInt(searchParams.get("agentScoreMin") || "0");
-    const agentScoreMax = parseInt(searchParams.get("agentScoreMax") || "100");
-    const sortBy = searchParams.get("sortBy") || "createdAt";
+    const agentScoreMin = parseBoundedInt(searchParams.get("agentScoreMin"), 0, 0, 100);
+    const agentScoreMax = parseBoundedInt(searchParams.get("agentScoreMax"), 100, 0, 100);
+    const requestedSortBy = searchParams.get("sortBy") || "createdAt";
+    const sortBy = VALID_SORT_FIELDS.has(requestedSortBy)
+      ? requestedSortBy
+      : "createdAt";
     const sortOrder = searchParams.get("sortOrder") === "asc" ? "asc" : "desc";
 
     // Pagination
-    const page = Math.max(1, parseInt(searchParams.get("page") || "1"));
-    const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "50")));
+    const page = parseBoundedInt(searchParams.get("page"), 1, 1, 10_000);
+    const limit = parseBoundedInt(searchParams.get("limit"), 50, 1, 100);
     const skip = (page - 1) * limit;
 
     // Build where clause
     const where: any = {};
 
-    if (status) {
+    if (status && VALID_STATUSES.has(status)) {
       where.status = status;
     }
 

@@ -7,6 +7,31 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
+const DEFAULT_BLACKLIST = [
+  "agent",
+  "broker",
+  "agency",
+  "real estate",
+  "property management",
+];
+
+function parseBlacklist(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeNumber(value: unknown, min: number, max: number): number | null {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numberValue)) return null;
+  return Math.max(min, Math.min(max, Math.round(numberValue)));
+}
+
 export async function GET() {
   try {
     let settings = await db.adminSetting.findFirst();
@@ -15,13 +40,7 @@ export async function GET() {
       // Create default settings
       settings = await db.adminSetting.create({
         data: {
-          blacklistKeywords: JSON.stringify([
-            "agent",
-            "broker",
-            "agency",
-            "real estate",
-            "property management",
-          ]),
+          blacklistKeywords: JSON.stringify(DEFAULT_BLACKLIST),
           scrapeInterval: 10,
           notifyMode: "ALL",
           agentThreshold: 60,
@@ -32,7 +51,7 @@ export async function GET() {
     // Parse blacklist for the frontend
     const parsedSettings = {
       ...settings,
-      blacklistKeywords: JSON.parse(settings.blacklistKeywords),
+      blacklistKeywords: parseBlacklist(settings.blacklistKeywords),
     };
 
     return NextResponse.json({ settings: parsedSettings });
@@ -55,17 +74,43 @@ export async function PUT(req: NextRequest) {
     const data: any = {};
 
     if (blacklistKeywords !== undefined) {
-      // Store as JSON string for SQLite compatibility
-      data.blacklistKeywords = JSON.stringify(blacklistKeywords);
+      if (!Array.isArray(blacklistKeywords)) {
+        return NextResponse.json(
+          { error: "blacklistKeywords must be an array of strings" },
+          { status: 400 }
+        );
+      }
+
+      const normalizedKeywords = blacklistKeywords
+        .filter((kw): kw is string => typeof kw === "string")
+        .map((kw) => kw.trim().toLowerCase())
+        .filter(Boolean);
+
+      // Store as JSON string so the UI and worker share one portable shape.
+      data.blacklistKeywords = JSON.stringify([...new Set(normalizedKeywords)]);
     }
     if (scrapeInterval !== undefined) {
-      data.scrapeInterval = Math.max(1, Math.min(1440, scrapeInterval)); // 1 min to 24 hrs
+      const normalized = normalizeNumber(scrapeInterval, 1, 1440);
+      if (normalized === null) {
+        return NextResponse.json(
+          { error: "scrapeInterval must be a number" },
+          { status: 400 }
+        );
+      }
+      data.scrapeInterval = normalized; // 1 min to 24 hrs
     }
     if (notifyMode !== undefined) {
       data.notifyMode = notifyMode === "VERIFIED_ONLY" ? "VERIFIED_ONLY" : "ALL";
     }
     if (agentThreshold !== undefined) {
-      data.agentThreshold = Math.max(0, Math.min(100, agentThreshold));
+      const normalized = normalizeNumber(agentThreshold, 0, 100);
+      if (normalized === null) {
+        return NextResponse.json(
+          { error: "agentThreshold must be a number" },
+          { status: 400 }
+        );
+      }
+      data.agentThreshold = normalized;
     }
 
     if (settings) {
@@ -86,7 +131,7 @@ export async function PUT(req: NextRequest) {
 
     const parsedSettings = {
       ...settings,
-      blacklistKeywords: JSON.parse(settings.blacklistKeywords),
+      blacklistKeywords: parseBlacklist(settings.blacklistKeywords),
     };
 
     return NextResponse.json({ settings: parsedSettings });
