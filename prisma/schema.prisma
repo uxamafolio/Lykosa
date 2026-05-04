@@ -1,8 +1,8 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// ═══════════════════════════════════════════════════════════════
+// Lykosa — AI-Powered Real Estate Lead Hunter
+// Data Models per PRD v2.1, Section 5.3
+// Adapted for SQLite (cuid instead of uuid, JSON string for arrays)
+// ═══════════════════════════════════════════════════════════════
 
 generator client {
   provider = "prisma-client-js"
@@ -13,20 +13,56 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ─── User ─────────────────────────────────────────────────────
 model User {
   id        String   @id @default(cuid())
   email     String   @unique
-  name      String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
-model Post {
-  id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// ─── Listing ──────────────────────────────────────────────────
+model Listing {
+  id              String    @id @default(cuid())
+  title           String
+  price           Float     @default(0)
+  url             String    @unique
+  source          String    @default("dubizzle")
+
+  phone           String?
+  agentScore      Int       @default(0)
+
+  sourceListedAt  DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Status: "NEW" | "SENT" | "IGNORED"
+  status          String    @default("NEW")
+
+  @@index([phone])
+  @@index([agentScore])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ─── AdminSetting ─────────────────────────────────────────────
+// SQLite doesn't support String[] natively.
+// blacklistKeywords is stored as a JSON string, e.g. '["agent","broker"]'
+model AdminSetting {
+  id                String  @id @default(cuid())
+
+  // JSON-encoded string array, e.g. '["agent","broker"]'
+  blacklistKeywords String  @default("[]")
+
+  // Scrape interval in minutes (default: 10)
+  scrapeInterval    Int     @default(10)
+
+  // "ALL" | "VERIFIED_ONLY"  (PRD §4.4 Shadow Mode)
+  notifyMode        String  @default("ALL")
+
+  // Agent score threshold (0–100). Listings above this are "Likely Agent"
+  agentThreshold    Int     @default(60)
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }

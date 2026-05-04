@@ -1,0 +1,9 @@
+{
+  "name": "dubizzle-monitor",
+  "version": "2.0.0",
+  "description": "Lykosa Hunter — Background scraper service with Prisma DB + Agent Scoring",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  },
+  "dependencies": {}
+}
