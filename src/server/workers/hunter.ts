@@ -124,6 +124,22 @@ export async function calculateAgentScore(
     score += 30;
   }
 
+  // ── +15: Title Pattern Heuristics (non-phone signals) ──────
+  // Patterns commonly used by agents in listing titles
+  const agentTitlePatterns = [
+    /\b(call|contact)\s+(now|us|me|today)\b/i,
+    /\b(best\s+price|price\s+negotiable|special\s+offer)\b/i,
+    /\b(multiple\s+units?|many\s+options|various\s+sizes)\b/i,
+    /\b(\d+\s*br\s+available|available\s+\d+\s+units)\b/i,
+    /\bview\s+now\b/i,
+  ];
+  for (const pattern of agentTitlePatterns) {
+    if (pattern.test(listing.title)) {
+      score += 15;
+      break; // Only add once
+    }
+  }
+
   // ── +20: High Frequency Posting ────────────────────────────
   // Same phone number posted multiple listings within ≤2 minutes
   if (listing.phone) {
@@ -153,10 +169,25 @@ export async function calculateAgentScore(
     "private landlord",
     "direct landlord",
     "by owner",
+    "direct owner",
+    "landlord direct",
   ];
   const hasOwnerSignal = ownerSignals.some((s) => titleLower.includes(s));
   if (hasOwnerSignal) {
     score -= 30;
+  }
+
+  // ── -15: Owner Context Signals (weaker but meaningful) ─────
+  const weakOwnerSignals = [
+    "cheque",
+    "cheques",
+    "no deposit",
+    "flexible payment",
+    "installment",
+  ];
+  const hasWeakOwnerSignal = weakOwnerSignals.some((s) => titleLower.includes(s));
+  if (hasWeakOwnerSignal && !hasOwnerSignal) {
+    score -= 15;
   }
 
   // Clamp to 0–100
@@ -494,12 +525,24 @@ export async function scrapeWithWebSearch(): Promise<RawListing[]> {
     if (seenUrls.has(url)) continue;
     seenUrls.add(url);
 
-    const title = r.name
+    let title = r.name
+      // Remove trailing site branding
       .replace(/\s*[|–—]\s*(dubizzle|dubizzle Dubai|dubizzle Dubai Classifieds)\s*$/i, "")
+      // Remove leading type prefix like "Apartment: " or "Apartment Flat: "
+      .replace(/^(Apartment\s*Flat?|Studio|Villa|Townhouse|Penthouse)\s*:\s*/i, "")
       .trim();
+
     const price = extractPriceFromSnippet(r.snippet) || extractPriceFromTitle(title);
 
-    listings.push({ title, url, price, source: "dubizzle" });
+    // Try to extract source date from URL like /2026/3/28/
+    const dateMatch = r.url.match(/\/(\d{4})\/(\d{1,2})\/(\d{1,2})\//);
+    let sourceListedAt: Date | undefined;
+    if (dateMatch) {
+      const [, y, m, d] = dateMatch.map(Number);
+      sourceListedAt = new Date(y, m - 1, d);
+    }
+
+    listings.push({ title, url, price, source: "dubizzle", sourceListedAt });
   }
 
   return listings;
@@ -508,16 +551,47 @@ export async function scrapeWithWebSearch(): Promise<RawListing[]> {
 // ─── Price Extraction Helpers ─────────────────────────────────
 
 function extractPriceFromSnippet(snippet: string): string {
+  if (!snippet) return "";
+
+  // Pattern 1: "AED 45,000 / Yearly" or "AED. 45,000 Yearly"
   let m = snippet.match(/AED\.?\s*([\d,]+(?:\.\d+)?)[.\s]*(Yearly|Monthly|Daily)?/i);
   if (m) return `AED ${m[1]}${m[2] ? ` / ${m[2]}` : ""}`;
-  m = snippet.match(/([\d,]{4,})\s*(Yearly|Monthly)/i);
+
+  // Pattern 2: "45,000 Yearly" or "65000/Monthly"
+  m = snippet.match(/([\d,]{4,})\s*[-/]?\s*(Yearly|Monthly|Daily)/i);
   if (m) return `AED ${m[1]} / ${m[2]}`;
+
+  // Pattern 3: "AED 45,000" without period indicator
+  m = snippet.match(/AED\s*([\d,]+)/i);
+  if (m) return `AED ${m[1]}`;
+
+  // Pattern 4: Bare number with currency context like "45000 AED"
+  m = snippet.match(/([\d,]{4,})\s*AED/i);
+  if (m) return `AED ${m[1]}`;
+
   return "";
 }
 
 function extractPriceFromTitle(title: string): string {
-  const m = title.match(/AED\s*([\d,]+)/i);
-  return m ? `AED ${m[1]}` : "";
+  if (!title) return "";
+
+  // Pattern 1: "AED 45,000" in title
+  let m = title.match(/AED\s*([\d,]+)/i);
+  if (m) return `AED ${m[1]}`;
+
+  // Pattern 2: Price in parentheses like "48000 (12 CHEQUES)" — common on Dubizzle
+  m = title.match(/\b([\d,]{4,})\s*\(\d+\s*cheque/i);
+  if (m) return `AED ${m[1]} / Yearly`;
+
+  // Pattern 3: Bare number ≥4 digits likely to be AED price ("Studio | 48000 | JVC")
+  m = title.match(/\|\s*([\d,]{4,})\s*\|/);
+  if (m) return `AED ${m[1]}`;
+
+  // Pattern 4: Price at end of title like "... 48000"
+  m = title.match(/\s([\d,]{4,})\s*$/);
+  if (m) return `AED ${m[1]}`;
+
+  return "";
 }
 
 // ─── Main Hunter Cycle ───────────────────────────────────────
@@ -629,6 +703,11 @@ export async function runHunterCycle(
     });
   }
 
+  // Step 7: Enrich top leads with phone/price via page_reader (async, non-blocking)
+  enrichTopLeads(db, brainResult.verified, agentScores).catch((err) => {
+    console.error("  ⚠️  Enrichment error (non-fatal):", (err as Error).message);
+  });
+
   const elapsed = ((Date.now() - startedAt.getTime()) / 1_000).toFixed(1);
   console.log(`  📊 Cycle #${cycleNumber} complete in ${elapsed}s`);
 
@@ -670,4 +749,260 @@ export async function getAdminSettings(db: PrismaClient): Promise<AdminSetting |
 export async function getScrapeIntervalMs(db: PrismaClient): Promise<number> {
   const settings = await getAdminSettings(db);
   return (settings?.scrapeInterval ?? 10) * 60 * 1_000;
+}
+
+// ─── Lead Enrichment (PRD §4.1 — phone extraction, price enrichment) ──
+
+/**
+ * Enrich top leads by using LLM to extract phone/price from search snippets.
+ * Dubizzle's WAF blocks page_reader, so we use the LLM to parse the snippets
+ * we already collected from web_search.
+ * Runs async/non-blocking after the main cycle.
+ */
+export async function enrichTopLeads(
+  db: PrismaClient,
+  verifiedListings: RawListing[],
+  agentScores: Map<string, number>
+): Promise<void> {
+  // Find listings that need enrichment (no phone or no price)
+  const toEnrich = verifiedListings
+    .filter((l) => !l.phone || parsePrice(l.price) === 0)
+    .sort((a, b) => (agentScores.get(a.url) ?? 50) - (agentScores.get(b.url) ?? 50))
+    .slice(0, 5);
+
+  if (toEnrich.length === 0) return;
+
+  console.log(`  🔍 Enriching ${toEnrich.length} lead(s) via web_search + LLM…`);
+
+  const ZAI = (await import("z-ai-web-dev-sdk")).default;
+  const zai = await ZAI.create();
+
+  for (const listing of toEnrich) {
+    try {
+      // Search for the specific listing to get richer snippets
+      const searchTitle = listing.title.substring(0, 60).replace(/[|–—]/g, " ").trim();
+      const searchResults = await zai.functions.invoke("web_search", {
+        query: `site:dubai.dubizzle.com "${searchTitle}"`,
+        num: 3,
+      });
+
+      // Collect all snippets for this listing
+      const snippets: string[] = [];
+      for (const r of searchResults) {
+        if (r.snippet) snippets.push(r.snippet);
+        if (r.name) snippets.push(r.name);
+      }
+
+      if (snippets.length === 0) continue;
+
+      // Use LLM to extract structured data from snippets
+      const allText = snippets.join("\n");
+      const completion = await zai.chat.completions.create({
+        messages: [
+          {
+            role: "assistant",
+            content: `You are a data extraction assistant for Dubai real estate listings. Extract ONLY the following fields from the given text:
+- phone: UAE phone number in +971XXXXXXXXX format, or null
+- price: numeric price in AED (just the number), or null
+Respond with valid JSON only. No additional text. Example: {"phone": "+971501234567", "price": 48000}`,
+          },
+          {
+            role: "user",
+            content: `Extract phone and price from this listing data:\n\nTitle: ${listing.title}\nSnippets:\n${allText}`,
+          },
+        ],
+        thinking: { type: "disabled" },
+      });
+
+      const response = completion.choices[0]?.message?.content || "";
+      let extracted: any = {};
+      try {
+        // Try to parse JSON from response
+        const jsonMatch = response.match(/\{[\s\S]*?\}/);
+        if (jsonMatch) {
+          extracted = JSON.parse(jsonMatch[0]);
+        }
+      } catch { /* skip parse errors */ }
+
+      // Update the listing in DB
+      const dbListing = await db.listing.findUnique({ where: { url: listing.url } });
+      if (dbListing) {
+        const updateData: any = {};
+
+        if (extracted.phone && typeof extracted.phone === "string" && extracted.phone.startsWith("+971")) {
+          updateData.phone = extracted.phone;
+          console.log(`    📞 LLM extracted phone: ${extracted.phone}`);
+        }
+
+        if (extracted.price && typeof extracted.price === "number" && extracted.price > 0 && dbListing.price === 0) {
+          updateData.price = extracted.price;
+          console.log(`    💰 LLM extracted price: AED ${extracted.price.toLocaleString()}`);
+        }
+
+        if (Object.keys(updateData).length > 0) {
+          await db.listing.update({
+            where: { id: dbListing.id },
+            data: updateData,
+          });
+        }
+      }
+
+      // Rate limit between LLM calls
+      await sleep(1_000);
+    } catch (err) {
+      console.error(`    ❌ Enrichment error for ${listing.url}:`, (err as Error).message);
+    }
+  }
+}
+
+/**
+ * Extract a UAE phone number from page text.
+ * UAE formats: +971-XX-XXX-XXXX, +971XXXXXXXXX, 05X-XXX-XXXX, 05XXXXXXXX
+ */
+export function extractPhoneFromPage(text: string): string | null {
+  // Pattern 1: +971XXXXXXXXX (most common on Dubizzle)
+  let m = text.match(/\+971[\s-]?[5-7]\d[\s-]?\d{3}[\s-]?\d{4}/);
+  if (m) return m[0].replace(/[\s-]/g, "");
+
+  // Pattern 2: 05XXXXXXXX (local format)
+  m = text.match(/05[0-9][\s-]?\d{3}[\s-]?\d{4}/);
+  if (m) {
+    const local = m[0].replace(/[\s-]/g, "");
+    return `+971${local.substring(1)}`; // Convert to +971 format
+  }
+
+  // Pattern 3: +971 X XX XXX XXXX with spaces
+  m = text.match(/\+971[\s]+[5-7]\d[\s]+\d{3}[\s]+\d{4}/);
+  if (m) return m[0].replace(/\s/g, "");
+
+  // Pattern 4: Phone label followed by number
+  m = text.match(/(?:phone|mobile|call|tel|contact|whatsapp)[:\s]*[\+]?[9715-7][\d\s-]{8,15}/i);
+  if (m) {
+    const digits = m[0].replace(/[^\d+]/g, "");
+    if (digits.length >= 10) return digits;
+  }
+
+  return null;
+}
+
+/**
+ * Extract price from full page text (more data available than snippet).
+ */
+export function extractPriceFromPage(text: string): number {
+  // Try AED patterns first
+  let m = text.match(/AED\.?\s*([\d,]+(?:\.\d+)?)/i);
+  if (m) return parseFloat(m[1].replace(/,/g, ""));
+
+  // Try "Price: XXXXX" pattern
+  m = text.match(/price[:\s]*([\d,]{4,})/i);
+  if (m) return parseFloat(m[1].replace(/,/g, ""));
+
+  // Try "XXXXX / Yearly" pattern
+  m = text.match(/([\d,]{4,})\s*\/\s*(Yearly|Monthly|Daily)/i);
+  if (m) return parseFloat(m[1].replace(/,/g, ""));
+
+  return 0;
+}
+
+/**
+ * Backfill enrichment for existing listings that lack phone/price data.
+ * Uses LLM + web_search instead of page_reader (which is blocked by Dubizzle WAF).
+ */
+export async function backfillListings(db: PrismaClient): Promise<number> {
+  console.log("  🔄 Backfill: enriching existing listings via LLM…");
+
+  const listingsWithoutData = await db.listing.findMany({
+    where: {
+      OR: [
+        { phone: null },
+        { price: 0 },
+      ],
+    },
+    orderBy: { agentScore: "asc" }, // Prioritize likely owners first
+    take: 10,
+  });
+
+  if (listingsWithoutData.length === 0) {
+    console.log("  ✅ Backfill: all listings already enriched.");
+    return 0;
+  }
+
+  console.log(`  📋 Backfill: ${listingsWithoutData.length} listings need enrichment.`);
+
+  const ZAI = (await import("z-ai-web-dev-sdk")).default;
+  const zai = await ZAI.create();
+  let enriched = 0;
+
+  for (const listing of listingsWithoutData) {
+    try {
+      await sleep(1_500); // Rate limit
+
+      // Search for richer snippets about this listing
+      const searchTitle = listing.title.substring(0, 60).replace(/[|–—]/g, " ").trim();
+      const searchResults = await zai.functions.invoke("web_search", {
+        query: `site:dubizzle.com "${searchTitle}" AED`,
+        num: 5,
+      });
+
+      const snippets: string[] = [];
+      for (const r of searchResults) {
+        if (r.snippet) snippets.push(r.snippet);
+        if (r.name) snippets.push(r.name);
+      }
+
+      if (snippets.length === 0) continue;
+
+      // LLM extraction
+      const allText = snippets.join("\n");
+      const completion = await zai.chat.completions.create({
+        messages: [
+          {
+            role: "assistant",
+            content: `You are a data extraction assistant for Dubai real estate listings. Extract ONLY the following fields from the given text:
+- phone: UAE phone number in +971XXXXXXXXX format, or null if not found
+- price: numeric price in AED (just the number, no commas), or null if not found
+Respond with valid JSON only. No additional text. Example: {"phone": "+971501234567", "price": 48000}`,
+          },
+          {
+            role: "user",
+            content: `Extract phone and price from this listing data:\n\nTitle: ${listing.title}\nURL: ${listing.url}\nSnippets:\n${allText}`,
+          },
+        ],
+        thinking: { type: "disabled" },
+      });
+
+      const response = completion.choices[0]?.message?.content || "";
+      let extracted: any = {};
+      try {
+        const jsonMatch = response.match(/\{[\s\S]*?\}/);
+        if (jsonMatch) {
+          extracted = JSON.parse(jsonMatch[0]);
+        }
+      } catch { /* skip */ }
+
+      const updateData: any = {};
+      if (extracted.phone && typeof extracted.phone === "string" && extracted.phone.startsWith("+971")) {
+        updateData.phone = extracted.phone;
+      }
+      if (extracted.price && typeof extracted.price === "number" && extracted.price > 0 && listing.price === 0) {
+        updateData.price = extracted.price;
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        await db.listing.update({
+          where: { id: listing.id },
+          data: updateData,
+        });
+        enriched++;
+        console.log(
+          `    ✅ ${listing.title.substring(0, 40)}… → phone=${updateData.phone ?? "—"}, price=${updateData.price ? `AED ${updateData.price.toLocaleString()}` : "—"}`
+        );
+      }
+    } catch (err) {
+      console.error(`    ❌ Backfill error: ${(err as Error).message}`);
+    }
+  }
+
+  console.log(`  📊 Backfill: enriched ${enriched} listing(s).`);
+  return enriched;
 }

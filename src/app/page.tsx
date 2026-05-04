@@ -178,6 +178,7 @@ export default function LykosaDashboard() {
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [hunterStatus, setHunterStatus] = useState<HunterStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [enriching, setEnriching] = useState(false);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -243,6 +244,23 @@ export default function LykosaDashboard() {
       body: JSON.stringify(updates),
     });
     fetchData();
+  };
+
+  // Run backfill enrichment
+  const runEnrichment = async () => {
+    setEnriching(true);
+    try {
+      const res = await fetch("/api/listings/backfill", { method: "POST" });
+      const data = await res.json();
+      if (data.success) {
+        alert(`✅ Enriched ${data.enriched} listing(s) with phone/price data`);
+      }
+    } catch (err) {
+      console.error("Enrichment error:", err);
+    } finally {
+      setEnriching(false);
+      fetchData();
+    }
   };
 
   // ─── Stats ────────────────────────────────────────────────
@@ -411,7 +429,7 @@ export default function LykosaDashboard() {
               />
             )}
             {activeTab === "hunter" && (
-              <HunterTab status={hunterStatus} />
+              <HunterTab status={hunterStatus} onEnrich={runEnrichment} enriching={enriching} />
             )}
           </>
         )}
@@ -847,7 +865,7 @@ function ControlTab({
 
 // ─── Hunter Tab ───────────────────────────────────────────────
 
-function HunterTab({ status }: { status: HunterStatus | null }) {
+function HunterTab({ status, onEnrich, enriching }: { status: HunterStatus | null; onEnrich: () => void; enriching: boolean }) {
   if (!status) {
     return (
       <Card className="bg-card/60 backdrop-blur border-border/50">
@@ -996,6 +1014,46 @@ function HunterTab({ status }: { status: HunterStatus | null }) {
                 {status.config?.agentThreshold ?? 60}
               </p>
             </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Data Enrichment */}
+      <Card className="bg-card/60 backdrop-blur border-border/50">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Zap className="h-4 w-4 text-lime-400" />
+            Data Enrichment
+          </CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Extract phone numbers &amp; prices from actual listing pages
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-muted-foreground">
+                Reads each listing page to extract phone numbers (for WhatsApp) and accurate prices.
+                Auto-enrichment runs for top leads each cycle, or trigger manually below.
+              </p>
+            </div>
+            <Button
+              onClick={onEnrich}
+              disabled={enriching}
+              className="bg-lime-400 text-slate-950 hover:bg-lime-300 ml-4 shrink-0"
+            >
+              {enriching ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  Enriching…
+                </>
+              ) : (
+                <>
+                  <Zap className="h-4 w-4 mr-2" />
+                  Enrich Now
+                </>
+              )}
+            </Button>
           </div>
         </CardContent>
       </Card>

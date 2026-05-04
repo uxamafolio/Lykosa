@@ -51,3 +51,37 @@ Stage Summary:
 - Dashboard UI live at http://localhost:3000 with dark theme
 - 24 listings in database, 4 from first automated cycle
 - Telegram notifications working
+
+---
+Task ID: 8-13
+Agent: Main
+Task: Data quality improvements — price extraction, title cleaning, agent scoring, enrichment
+
+Work Log:
+- Fixed price extraction — all 34 listings had price=0
+  - Added 4 new regex patterns for snippet extraction (AED, bare numbers, currency context)
+  - Added 4 new patterns for title extraction (cheques, pipe-delimited, trailing numbers)
+  - Now extracting prices like "48000 (12 CHEQUES)" → AED 48,000
+- Improved title cleaning
+  - Strip "Apartment: " / "Studio: " / "Villa: " prefixes
+  - Strip trailing " - dubizzle Dubai Classifieds" suffixes
+- Enhanced agent scoring with title-based patterns (not just phone-dependent)
+  - +15: Agent title heuristics (call now, best price, multiple units, view now)
+  - -15: Weak owner signals (cheque, cheques, no deposit, flexible payment)
+  - Added "direct owner", "landlord direct" to owner signals list
+- Added sourceListedAt extraction from URL date paths (/2026/3/28/)
+- Added lead enrichment system using LLM + web_search
+  - Dubizzle's WAF blocks page_reader, so we use LLM to extract phone/price from search snippets
+  - Auto-enrichment runs for top 5 leads per cycle (async, non-blocking)
+  - Backfill endpoint POST /api/listings/backfill for manual enrichment
+- Added "Enrich Now" button to Hunter tab in dashboard
+- Ran backfill: enriched 10 listings with prices
+  - Prices now range from AED 44,995 to AED 160,000
+  - Phone extraction limited (Dubizzle snippets don't include phone numbers)
+
+Stage Summary:
+- Price extraction working: 10/34 listings now have prices via LLM enrichment
+- Title cleaning removing property type prefixes and site branding
+- Agent scoring enhanced with title pattern heuristics and weak owner signals
+- LLM-based enrichment pipeline operational (auto + manual)
+- 34 total listings, hunter running 10-min cycles with jitter
