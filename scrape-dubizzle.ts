@@ -16,9 +16,8 @@
  *    3. INTERVAL      — auto-runs every 10 minutes with graceful shutdown
  *
  *  Usage:
- *    TELEGRAM_BOT_TOKEN=123456:ABC-DEF \
- *    TELEGRAM_CHAT_ID=987654321 \
- *    bun run scrape-dubizzle.ts
+ *    1. Fill in .env with your TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
+ *    2. bun run scrape-dubizzle.ts
  *
  *  Requirements:
  *    bun add playwright playwright-extra puppeteer-extra-plugin-stealth z-ai-web-dev-sdk
@@ -30,6 +29,26 @@ import stealth from "puppeteer-extra-plugin-stealth";
 import ZAI from "z-ai-web-dev-sdk";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
+
+// ─── Load .env file ──────────────────────────────────────────────────────
+// Auto-loads .env from the script's directory so you don't need to export vars
+const ENV_PATH = join(import.meta.dir, ".env");
+if (existsSync(ENV_PATH)) {
+  const envContent = readFileSync(ENV_PATH, "utf-8");
+  for (const line of envContent.split("\n")) {
+    const trimmed = line.trim();
+    // Skip comments and empty lines
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex === -1) continue;
+    const key = trimmed.slice(0, eqIndex).trim();
+    const val = trimmed.slice(eqIndex + 1).trim();
+    // Only set if not already defined in the environment
+    if (!process.env[key]) {
+      process.env[key] = val;
+    }
+  }
+}
 
 // ─── Configuration ───────────────────────────────────────────────────────
 
