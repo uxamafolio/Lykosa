@@ -1,26 +1,23 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════
- *  Dubizzle Dubai — Apartments for Rent (Owner Listings) Scraper
+ *  Dubizzle Dubai — Owner Apartment Listings Monitor
  * ═══════════════════════════════════════════════════════════════════════════
  *
- *  Scrapes the first page and prints the title + absolute URL of the first
- *  5 listings from:
+ *  Scrapes Dubizzle owner apartment listings, persists seen listings to a
+ *  local JSON file, and sends Telegram notifications for newly discovered
+ *  listings. Runs automatically every 10 minutes.
+ *
+ *  Target:
  *    https://dubai.dubizzle.com/en/property-for-rent/residential/apartmentflat/?is_owner=1
  *
- *  ┌──────────────────────────────────────────────────────────────────────┐
- *  │  Strategy                                                           │
- *  │                                                                     │
- *  │  1. PRIMARY  — Playwright (headless Chromium) with stealth mode,    │
- *  │               custom User-Agent, and anti-fingerprint injections.   │
- *  │               Waits for Incapsula JS challenge to self-resolve.     │
- *  │                                                                     │
- *  │  2. FALLBACK — z-ai-web-dev-sdk web_search when Dubizzle blocks     │
- *  │               automated browsers (Imperva/Incapsula WAF).           │
- *  │               Searches Google's index for individual listing pages   │
- *  │               and returns title + absolute URL.                     │
- *  └──────────────────────────────────────────────────────────────────────┘
+ *  Features:
+ *    1. LOCAL MEMORY  — seen_listings.json tracks every listing ever seen
+ *    2. TELEGRAM      — instant notification for new listings (title, price, link)
+ *    3. INTERVAL      — auto-runs every 10 minutes with graceful shutdown
  *
  *  Usage:
+ *    TELEGRAM_BOT_TOKEN=123456:ABC-DEF \
+ *    TELEGRAM_CHAT_ID=987654321 \
  *    bun run scrape-dubizzle.ts
  *
  *  Requirements:
@@ -31,6 +28,8 @@
 import { chromium } from "playwright-extra";
 import stealth from "puppeteer-extra-plugin-stealth";
 import ZAI from "z-ai-web-dev-sdk";
+import { readFileSync, writeFileSync, existsSync } from "fs";
+import { join } from "path";
 
 // ─── Configuration ───────────────────────────────────────────────────────
 
@@ -43,42 +42,222 @@ const CUSTOM_USER_AGENT =
 
 const MAX_LISTINGS = 5;
 const PLAYWRIGHT_TIMEOUT_MS = 90_000;
+const CHECK_INTERVAL_MS = 10 * 60 * 1_000; // 10 minutes
+const SEEN_LISTINGS_PATH = join(import.meta.dir, "seen_listings.json");
+
+// Telegram — set via environment variables
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID ?? "";
 
 // ─── Types ───────────────────────────────────────────────────────────────
 
 interface Listing {
   title: string;
   url: string;
+  price: string; // e.g. "AED 80,000 / Yearly" or "" if unavailable
+}
+
+interface SeenListingRecord {
+  url: string;
+  title: string;
+  price: string;
+  firstSeen: string; // ISO timestamp
+}
+
+interface SeenListingsFile {
+  lastUpdated: string;
+  listings: SeenListingRecord[];
 }
 
 // ─── Stealth Playwright setup ────────────────────────────────────────────
 
 chromium.use(stealth());
 
-// ─── Helper: print results ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  1. LOCAL MEMORY — seen_listings.json
+// ═══════════════════════════════════════════════════════════════════════════
 
-function printResults(listings: Listing[], source: string): void {
-  const top = listings.slice(0, MAX_LISTINGS);
-
-  if (top.length === 0) {
-    console.log(`\n⚠️  No listings found via ${source}.`);
-    return;
+function loadSeenListings(): SeenListingsFile {
+  if (!existsSync(SEEN_LISTINGS_PATH)) {
+    return { lastUpdated: new Date().toISOString(), listings: [] };
   }
+  try {
+    const raw = readFileSync(SEEN_LISTINGS_PATH, "utf-8");
+    return JSON.parse(raw) as SeenListingsFile;
+  } catch {
+    console.warn("⚠️  Could not parse seen_listings.json — starting fresh.");
+    return { lastUpdated: new Date().toISOString(), listings: [] };
+  }
+}
 
-  console.log(
-    `\n✅ Found ${listings.length} listing(s) via ${source}. ` +
-      `Showing first ${top.length}:\n`
-  );
-  console.log("=".repeat(80));
-  top.forEach((l, i) => {
-    console.log(`\n  ${i + 1}. ${l.title}`);
-    console.log(`     ${l.url}`);
-  });
-  console.log("\n" + "=".repeat(80));
+function saveSeenListings(data: SeenListingsFile): void {
+  data.lastUpdated = new Date().toISOString();
+  writeFileSync(SEEN_LISTINGS_PATH, JSON.stringify(data, null, 2), "utf-8");
+}
+
+/**
+ * Compare fresh listings against the persisted set.
+ * Returns only the listings that have NOT been seen before.
+ */
+function findNewListings(
+  fresh: Listing[],
+  seen: SeenListingsFile
+): Listing[] {
+  const seenUrls = new Set(seen.listings.map((r) => r.url));
+  return fresh.filter((l) => !seenUrls.has(l.url));
+}
+
+/**
+ * Add new listings to the persisted set and save to disk.
+ */
+function persistNewListings(
+  newListings: Listing[],
+  seen: SeenListingsFile
+): SeenListingsFile {
+  const now = new Date().toISOString();
+  for (const l of newListings) {
+    seen.listings.push({
+      url: l.url,
+      title: l.title,
+      price: l.price,
+      firstSeen: now,
+    });
+  }
+  saveSeenListings(seen);
+  return seen;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  METHOD 1 — Playwright with stealth + anti-fingerprint
+//  2. TELEGRAM NOTIFICATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Send a Telegram message via the Bot API.
+ * Silently no-ops if TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set.
+ */
+async function sendTelegramMessage(text: string): Promise<void> {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.log("📧 Telegram not configured — skipping notification.");
+    return;
+  }
+
+  const url =
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: "HTML",
+        disable_web_page_preview: false,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      console.error(`❌ Telegram API error (${res.status}): ${body}`);
+    }
+  } catch (err) {
+    console.error("❌ Telegram fetch error:", (err as Error).message);
+  }
+}
+
+/**
+ * Build and send a notification for a single new listing.
+ */
+async function notifyNewListing(listing: Listing): Promise<void> {
+  const priceLine = listing.price
+    ? `💰 <b>Price:</b> ${escapeHtml(listing.price)}\n`
+    : "";
+
+  const message =
+    `🏠 <b>New Dubizzle Listing!</b>\n\n` +
+    `📝 <b>Title:</b> ${escapeHtml(listing.title)}\n` +
+    priceLine +
+    `🔗 <b>Link:</b> ${listing.url}\n\n` +
+    `⏰ Detected: ${new Date().toLocaleString("en-AE", { timeZone: "Asia/Dubai" })}`;
+
+  await sendTelegramMessage(message);
+}
+
+/**
+ * Send a summary notification when multiple new listings are found at once.
+ */
+async function notifyNewListingsBatch(listings: Listing[]): Promise<void> {
+  if (listings.length === 0) return;
+
+  if (listings.length === 1) {
+    await notifyNewListing(listings[0]);
+    return;
+  }
+
+  const lines = listings
+    .map((l, i) => {
+      const pricePart = l.price ? ` — ${l.price}` : "";
+      return `${i + 1}. <a href="${l.url}">${escapeHtml(l.title)}</a>${escapeHtml(pricePart)}`;
+    })
+    .join("\n");
+
+  const message =
+    `🏠 <b>${listings.length} New Dubizzle Listings!</b>\n\n` +
+    lines +
+    `\n\n⏰ ${new Date().toLocaleString("en-AE", { timeZone: "Asia/Dubai" })}`;
+
+  await sendTelegramMessage(message);
+}
+
+/** Minimal HTML-entity escaping for Telegram HTML parse mode. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PRICE EXTRACTION HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Extract a price string from a Dubizzle search result snippet.
+ * Snippets often contain: "AED. 80,000. Yearly" or "AED 102,000 / Yearly"
+ */
+function extractPriceFromSnippet(snippet: string): string {
+  // Pattern 1: AED. 80,000. Yearly
+  let match = snippet.match(/AED\.?\s*([\d,]+(?:\.\d+)?)[.\s]*(Yearly|Monthly|Daily)?/i);
+  if (match) {
+    const amount = match[1];
+    const period = match[2] ? ` / ${match[2]}` : "";
+    return `AED ${amount}${period}`;
+  }
+
+  // Pattern 2: More general currency pattern
+  match = snippet.match(/([\d,]{4,})\s*(Yearly|Monthly)/i);
+  if (match) {
+    return `AED ${match[1]} / ${match[2]}`;
+  }
+
+  return "";
+}
+
+/**
+ * Try to extract a price from a Dubizzle listing title.
+ * Titles sometimes contain: "2BHK Direct from Owner – Only AED 54,000"
+ */
+function extractPriceFromTitle(title: string): string {
+  const match = title.match(/AED\s*([\d,]+)/i);
+  if (match) {
+    return `AED ${match[1]}`;
+  }
+  return "";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SCRAPING — Playwright (primary)
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function scrapeWithPlaywright(): Promise<Listing[]> {
@@ -111,18 +290,12 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
 
   // Anti-fingerprint injections
   await context.addInitScript(() => {
-    // Hide webdriver flag
     Object.defineProperty(navigator, "webdriver", { get: () => false });
-
-    // Realistic language list
     Object.defineProperty(navigator, "languages", {
       get: () => ["en-US", "en", "ar-AE"],
     });
-
-    // Chrome runtime mock (many WAFs check for this)
     (window as any).chrome = { runtime: {} };
 
-    // Override Permissions API
     const origQuery = window.navigator.permissions.query.bind(
       window.navigator.permissions
     );
@@ -133,7 +306,6 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
           } as PermissionStatus)
         : origQuery(params);
 
-    // Override plugins to look realistic
     Object.defineProperty(navigator, "plugins", {
       get: () => [
         { name: "Chrome PDF Plugin", filename: "internal-pdf-viewer" },
@@ -153,11 +325,9 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
       timeout: PLAYWRIGHT_TIMEOUT_MS,
     });
 
-    // Wait for Incapsula JS challenge to execute & page to reload
     console.log("⏳ Waiting for Incapsula challenge to resolve…");
     await page.waitForTimeout(12_000);
 
-    // Check if we're still on the challenge page
     const isBlocked = await page.evaluate(() => {
       return (
         document.querySelector('iframe[id="main-iframe"]') !== null ||
@@ -174,22 +344,18 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
       await page.waitForTimeout(8_000);
     }
 
-    // ── Extract listings ────────────────────────────────────────────────
-
-    // Strategy A: property detail links (anchor href matching slug pattern)
+    // Strategy A: property detail links
     const listings: Listing[] = await page.evaluate(() => {
       const anchors = Array.from(
         document.querySelectorAll<HTMLAnchorElement>("a")
       );
       const seen = new Set<string>();
-      const results: Listing[] = [];
+      const results: { title: string; url: string; price: string }[] = [];
 
       for (const anchor of anchors) {
         const href = anchor.href;
         if (!href || seen.has(href)) continue;
 
-        // Dubizzle property detail URLs:
-        // /en/property-for-rent/residential/apartmentflat/…/slug-name-2-NNN
         if (
           href.includes("apartmentflat") &&
           href.match(/-\d+\/?$/) &&
@@ -205,11 +371,21 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
               anchor.textContent?.trim().split("\n")[0].trim() ?? "";
           }
 
+          // Try to find price in card text
+          const cardText = anchor.textContent ?? "";
+          const priceMatch = cardText.match(
+            /AED\.?\s*([\d,]+(?:\.\d+)?)[.\s]*(Yearly|Monthly)?/i
+          );
+          const price = priceMatch
+            ? `AED ${priceMatch[1]}${priceMatch[2] ? ` / ${priceMatch[2]}` : ""}`
+            : "";
+
           if (title && title.length > 5) {
             seen.add(href);
             results.push({
               title: title.substring(0, 200),
               url: href,
+              price,
             });
           }
         }
@@ -218,7 +394,7 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
       return results;
     });
 
-    // Strategy B: __NEXT_DATA__ (Next.js hydration data)
+    // Strategy B: __NEXT_DATA__
     if (listings.length === 0) {
       console.log("Strategy A found nothing. Trying __NEXT_DATA__…");
 
@@ -228,7 +404,7 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
 
         try {
           const data = JSON.parse(el.textContent);
-          const results: Listing[] = [];
+          const results: { title: string; url: string; price: string }[] = [];
 
           const findListings = (obj: any, depth = 0): any[] => {
             if (!obj || typeof obj !== "object" || depth > 8) return [];
@@ -247,8 +423,7 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
           };
 
           for (const item of findListings(data)) {
-            const title =
-              item.title || item.name || item.heading || "";
+            const title = item.title || item.name || item.heading || "";
             const rawUrl = item.listing_url || item.url || "";
             const url = rawUrl.startsWith("http")
               ? rawUrl
@@ -257,8 +432,9 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
                 : item.slug
                   ? `https://dubai.dubizzle.com${item.slug}`
                   : "";
+            const price = item.price ? String(item.price) : "";
 
-            if (title && url) results.push({ title, url });
+            if (title && url) results.push({ title, url, price });
           }
 
           return results;
@@ -280,7 +456,7 @@ async function scrapeWithPlaywright(): Promise<Listing[]> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  METHOD 2 — Fallback: z-ai-web-dev-sdk web_search
+//  SCRAPING — z-ai-web-dev-sdk web_search (fallback)
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function scrapeWithWebSearch(): Promise<Listing[]> {
@@ -290,7 +466,6 @@ async function scrapeWithWebSearch(): Promise<Listing[]> {
 
   const zai = await ZAI.create();
 
-  // Use multiple search queries to maximize coverage
   const queries = [
     'site:dubai.dubizzle.com "direct from owner" apartment rent',
     'site:dubai.dubizzle.com/en/property-for-rent/residential/apartmentflat owner 2026',
@@ -298,7 +473,8 @@ async function scrapeWithWebSearch(): Promise<Listing[]> {
     'site:dubizzle.com "direct from owner" apartment flat rent dubai 2026',
   ];
 
-  const allRawResults: { url: string; name: string }[] = [];
+  // Collect raw search results with snippets (for price extraction)
+  const allRawResults: { url: string; name: string; snippet: string }[] = [];
 
   for (const query of queries) {
     try {
@@ -308,7 +484,11 @@ async function scrapeWithWebSearch(): Promise<Listing[]> {
       });
 
       for (const r of results) {
-        allRawResults.push({ url: r.url || "", name: r.name || "" });
+        allRawResults.push({
+          url: r.url || "",
+          name: r.name || "",
+          snippet: r.snippet || "",
+        });
       }
     } catch {
       // Skip failed queries
@@ -321,19 +501,19 @@ async function scrapeWithWebSearch(): Promise<Listing[]> {
   for (const result of allRawResults) {
     const url: string = result.url;
     const name: string = result.name;
+    const snippet: string = result.snippet;
     if (!url || !name) continue;
 
-    // Only keep individual listing pages — they have a date-path like /2026/4/28/
+    // Only keep individual listing pages — date-path like /2026/4/28/
     const hasDatePath = /\d{4}\/\d{1,2}\/\d{1,2}\//.test(url);
     const hasApartmentFlat = url.includes("apartmentflat");
     if (!hasDatePath || !hasApartmentFlat) continue;
 
-    // Build absolute URL and normalize domain + /en/ path
+    // Normalize URL: domain + /en/ path
     let absoluteUrl = url.startsWith("http")
       ? url
       : `https://dubai.dubizzle.com${url}`;
 
-    // Normalize domain: www.dubizzle.com → dubai.dubizzle.com
     absoluteUrl = absoluteUrl.replace(
       /^https:\/\/www\.dubizzle\.com\//,
       "https://dubai.dubizzle.com/"
@@ -343,7 +523,6 @@ async function scrapeWithWebSearch(): Promise<Listing[]> {
       "https://dubai.dubizzle.com/"
     );
 
-    // Normalize path: add /en/ if missing
     if (!absoluteUrl.includes("/en/")) {
       absoluteUrl = absoluteUrl.replace(
         "dubai.dubizzle.com/property-for-rent",
@@ -351,73 +530,218 @@ async function scrapeWithWebSearch(): Promise<Listing[]> {
       );
     }
 
-    // Deduplicate
     if (seenUrls.has(absoluteUrl)) continue;
     seenUrls.add(absoluteUrl);
 
-    // Clean up the title
+    // Clean title
     const cleanTitle = name
       .replace(/\s*[|–—]\s*(dubizzle|dubizzle Dubai|dubizzle Dubai Classifieds)\s*$/i, "")
       .trim();
 
-    listings.push({ title: cleanTitle, url: absoluteUrl });
+    // Extract price from snippet first, then from title
+    const price =
+      extractPriceFromSnippet(snippet) ||
+      extractPriceFromTitle(cleanTitle);
+
+    listings.push({ title: cleanTitle, url: absoluteUrl, price });
   }
 
   return listings;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Main
+//  DISPLAY HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
+
+function printResults(listings: Listing[], source: string): void {
+  const top = listings.slice(0, MAX_LISTINGS);
+
+  if (top.length === 0) {
+    console.log(`\n⚠️  No listings found via ${source}.`);
+    return;
+  }
+
+  console.log(
+    `\n✅ Found ${listings.length} listing(s) via ${source}. ` +
+      `Showing first ${top.length}:\n`
+  );
+  console.log("=".repeat(80));
+  top.forEach((l, i) => {
+    console.log(`\n  ${i + 1}. ${l.title}`);
+    if (l.price) console.log(`     💰 ${l.price}`);
+    console.log(`     🔗 ${l.url}`);
+  });
+  console.log("\n" + "=".repeat(80));
+}
+
+function printNewListings(newListings: Listing[]): void {
+  if (newListings.length === 0) {
+    console.log("\n📭 No new listings this cycle.");
+    return;
+  }
+
+  console.log(
+    `\n🔔 ${newListings.length} NEW listing(s) found!\n`
+  );
+  console.log("─".repeat(60));
+  newListings.forEach((l, i) => {
+    console.log(`  ${i + 1}. ${l.title}`);
+    if (l.price) console.log(`     💰 ${l.price}`);
+    console.log(`     🔗 ${l.url}`);
+    console.log();
+  });
+  console.log("─".repeat(60));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  3. MAIN LOOP — runs every 10 minutes
+// ═══════════════════════════════════════════════════════════════════════════
+
+let isRunning = false;
+
+async function runOnce(cycleNumber: number): Promise<void> {
+  if (isRunning) {
+    console.log("⏭️  Previous cycle still running — skipping this one.");
+    return;
+  }
+  isRunning = true;
+
+  const startedAt = new Date();
+  console.log(
+    `\n${"═".repeat(60)}\n` +
+    `  🔄 Cycle #${cycleNumber} — ${startedAt.toLocaleString("en-AE", { timeZone: "Asia/Dubai" })}\n` +
+    `${"═".repeat(60)}`
+  );
+
+  try {
+    // ── Scrape ───────────────────────────────────────────────────────────
+    const playwrightListings = await scrapeWithPlaywright();
+
+    let allListings: Listing[];
+
+    if (playwrightListings.length >= MAX_LISTINGS) {
+      allListings = playwrightListings;
+    } else {
+      if (playwrightListings.length > 0) {
+        console.log(
+          `\n⚠️  Playwright found only ${playwrightListings.length} listing(s). ` +
+            `Falling back to web search for more results.`
+        );
+      } else {
+        console.log(
+          "\n⚠️  Playwright found 0 listings (site is likely behind Incapsula WAF)."
+        );
+        console.log("   Switching to web-search fallback…");
+      }
+
+      const searchListings = await scrapeWithWebSearch();
+
+      // Merge + deduplicate
+      allListings = [...playwrightListings];
+      const seenUrls = new Set(allListings.map((l) => l.url));
+      for (const l of searchListings) {
+        if (!seenUrls.has(l.url)) {
+          allListings.push(l);
+          seenUrls.add(l.url);
+        }
+      }
+    }
+
+    if (allListings.length === 0) {
+      console.log("\n❌ No listings found via any method this cycle.");
+      return;
+    }
+
+    printResults(allListings, "Playwright + Web Search");
+
+    // ── Detect new listings ──────────────────────────────────────────────
+    const seenData = loadSeenListings();
+    const newListings = findNewListings(allListings, seenData);
+
+    printNewListings(newListings);
+
+    // ── Persist + Notify ─────────────────────────────────────────────────
+    if (newListings.length > 0) {
+      // Save to seen_listings.json
+      persistNewListings(newListings, seenData);
+      console.log(
+        `💾 Saved ${newListings.length} new listing(s) to ${SEEN_LISTINGS_PATH}`
+      );
+
+      // Send Telegram notification
+      await notifyNewListingsBatch(newListings);
+      console.log(
+        `📲 Telegram notification(s) sent for ${newListings.length} new listing(s).`
+      );
+    } else {
+      console.log("📭 All listings already known — no notifications sent.");
+    }
+
+    // Summary
+    const totalSeen = loadSeenListings().listings.length;
+    const elapsedMs = Date.now() - startedAt.getTime();
+    console.log(
+      `\n📊 Total tracked listings: ${totalSeen} | ` +
+      `Cycle took ${(elapsedMs / 1_000).toFixed(1)}s`
+    );
+  } catch (err) {
+    console.error("❌ Cycle error:", (err as Error).message);
+  } finally {
+    isRunning = false;
+  }
+}
 
 async function main(): Promise<void> {
   console.log(
     "\n" +
       "╔══════════════════════════════════════════════════════════════╗\n" +
-      "║  Dubizzle Dubai — Owner Apartment Listings Scraper         ║\n" +
-      "║  Target: Apartments for Rent (Owner, First Page)           ║\n" +
+      "║  Dubizzle Dubai — Owner Apartment Listings Monitor         ║\n" +
+      "║  🔄 Auto-run every 10 minutes                              ║\n" +
       "╚══════════════════════════════════════════════════════════════╝\n"
   );
 
-  // ── Try Method 1: Playwright ──────────────────────────────────────────
-  const playwrightListings = await scrapeWithPlaywright();
-
-  if (playwrightListings.length >= MAX_LISTINGS) {
-    printResults(playwrightListings, "Playwright");
-    return;
-  }
-
-  if (playwrightListings.length > 0) {
-    console.log(
-      `\n⚠️  Playwright found only ${playwrightListings.length} listing(s). ` +
-        `Falling back to web search for more results.`
-    );
+  // Validate Telegram config
+  if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+    console.log("📲 Telegram: ✅ Configured");
+    console.log(`   Chat ID: ${TELEGRAM_CHAT_ID}`);
   } else {
+    console.log("📲 Telegram: ⚠️  Not configured (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars)");
+  }
+
+  // Show memory file status
+  const existingData = loadSeenListings();
+  console.log(
+    `💾 Memory: ${existingData.listings.length} previously seen listing(s) in ${SEEN_LISTINGS_PATH}`
+  );
+
+  console.log(
+    `⏱️  Interval: every ${CHECK_INTERVAL_MS / 60_000} minutes\n`
+  );
+
+  // ── Run first cycle immediately ────────────────────────────────────────
+  let cycleNumber = 1;
+  await runOnce(cycleNumber);
+
+  // ── Schedule subsequent cycles ─────────────────────────────────────────
+  const timer = setInterval(async () => {
+    cycleNumber++;
+    await runOnce(cycleNumber);
+  }, CHECK_INTERVAL_MS);
+
+  // ── Graceful shutdown ──────────────────────────────────────────────────
+  const shutdown = (signal: string) => {
+    console.log(`\n\n🛑 Received ${signal}. Shutting down gracefully…`);
+    clearInterval(timer);
+    const finalData = loadSeenListings();
     console.log(
-      "\n⚠️  Playwright found 0 listings (site is likely behind Incapsula WAF)."
+      `💾 Final state: ${finalData.listings.length} listings tracked in ${SEEN_LISTINGS_PATH}`
     );
-    console.log("   Switching to web-search fallback…");
-  }
+    console.log("👋 Goodbye!");
+    process.exit(0);
+  };
 
-  // ── Try Method 2: Web Search fallback ─────────────────────────────────
-  const searchListings = await scrapeWithWebSearch();
-
-  // Merge, deduplicate by URL, and show
-  const allListings = [...playwrightListings];
-  const seenUrls = new Set(allListings.map((l) => l.url));
-
-  for (const l of searchListings) {
-    if (!seenUrls.has(l.url)) {
-      allListings.push(l);
-      seenUrls.add(l.url);
-    }
-  }
-
-  if (allListings.length > 0) {
-    printResults(allListings, "Playwright + Web Search");
-  } else {
-    console.log("\n❌ No listings found via any method.");
-  }
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 main();
