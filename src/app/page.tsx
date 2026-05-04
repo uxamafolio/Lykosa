@@ -22,6 +22,10 @@ import {
   TrendingUp,
   Home,
   Bell,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -185,6 +189,12 @@ export default function LykosaDashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [scoreRange, setScoreRange] = useState<[number, number]>([0, 100]);
 
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const PAGE_SIZE = 15;
+
   // Control center state
   const [newKeyword, setNewKeyword] = useState("");
 
@@ -193,7 +203,7 @@ export default function LykosaDashboard() {
     try {
       const [listingsRes, settingsRes, hunterRes] = await Promise.allSettled([
         fetch(
-          `/api/listings?status=${statusFilter === "all" ? "" : statusFilter}&search=${searchQuery}&agentScoreMin=${scoreRange[0]}&agentScoreMax=${scoreRange[1]}&limit=100&sortBy=createdAt&sortOrder=desc`
+          `/api/listings?status=${statusFilter === "all" ? "" : statusFilter}&search=${searchQuery}&agentScoreMin=${scoreRange[0]}&agentScoreMax=${scoreRange[1]}&page=${currentPage}&limit=${PAGE_SIZE}&sortBy=createdAt&sortOrder=desc`
         ),
         fetch("/api/admin-settings"),
         fetch("/api/hunter"),
@@ -202,6 +212,8 @@ export default function LykosaDashboard() {
       if (listingsRes.status === "fulfilled" && listingsRes.value.ok) {
         const data = await listingsRes.value.json();
         setListings(data.listings || []);
+        setTotalCount(data.pagination?.total ?? 0);
+        setTotalPages(data.pagination?.totalPages ?? 1);
       }
 
       if (settingsRes.status === "fulfilled" && settingsRes.value.ok) {
@@ -218,6 +230,11 @@ export default function LykosaDashboard() {
     } finally {
       setLoading(false);
     }
+  }, [statusFilter, searchQuery, scoreRange, currentPage]);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    setCurrentPage(1);
   }, [statusFilter, searchQuery, scoreRange]);
 
   useEffect(() => {
@@ -418,6 +435,11 @@ export default function LykosaDashboard() {
                 scoreRange={scoreRange}
                 setScoreRange={setScoreRange}
                 updateListingStatus={updateListingStatus}
+                currentPage={currentPage}
+                setCurrentPage={setCurrentPage}
+                totalCount={totalCount}
+                totalPages={totalPages}
+                pageSize={PAGE_SIZE}
               />
             )}
             {activeTab === "control" && (
@@ -435,8 +457,8 @@ export default function LykosaDashboard() {
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="mt-auto border-t border-border/50 bg-background/80 backdrop-blur">
+      {/* Footer — sticky at bottom of viewport */}
+      <footer className="sticky bottom-0 z-50 border-t border-border/50 bg-background/95 backdrop-blur-xl">
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex items-center justify-between text-xs text-muted-foreground">
           <span>Lykosa v2.0 — AI-Powered Lead Hunter</span>
           <span>
@@ -461,6 +483,11 @@ function LeadsTab({
   scoreRange,
   setScoreRange,
   updateListingStatus,
+  currentPage,
+  setCurrentPage,
+  totalCount,
+  totalPages,
+  pageSize,
 }: {
   listings: Listing[];
   statusFilter: string;
@@ -470,7 +497,32 @@ function LeadsTab({
   scoreRange: [number, number];
   setScoreRange: (v: [number, number]) => void;
   updateListingStatus: (id: string, status: string) => void;
+  currentPage: number;
+  setCurrentPage: (v: number) => void;
+  totalCount: number;
+  totalPages: number;
+  pageSize: number;
 }) {
+  const startItem = (currentPage - 1) * pageSize + 1;
+  const endItem = Math.min(currentPage * pageSize, totalCount);
+
+  // Generate page numbers to display
+  const getPageNumbers = (): (number | "ellipsis")[] => {
+    const pages: (number | "ellipsis")[] = [];
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      pages.push(1);
+      if (currentPage > 3) pages.push("ellipsis");
+      const start = Math.max(2, currentPage - 1);
+      const end = Math.min(totalPages - 1, currentPage + 1);
+      for (let i = start; i <= end; i++) pages.push(i);
+      if (currentPage < totalPages - 2) pages.push("ellipsis");
+      pages.push(totalPages);
+    }
+    return pages;
+  };
+
   return (
     <div className="space-y-4">
       {/* Filters */}
@@ -524,7 +576,7 @@ function LeadsTab({
       {/* Table */}
       <Card className="bg-card/60 backdrop-blur border-border/50">
         <CardContent className="p-0">
-          <ScrollArea className="max-h-[calc(100vh-380px)]">
+          <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow className="border-border/50 hover:bg-transparent">
@@ -629,9 +681,87 @@ function LeadsTab({
                 )}
               </TableBody>
             </Table>
-          </ScrollArea>
+          </div>
         </CardContent>
       </Card>
+
+      {/* Pagination */}
+      {totalCount > 0 && (
+        <Card className="bg-card/60 backdrop-blur border-border/50">
+          <CardContent className="px-4 py-3">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+              {/* Info */}
+              <p className="text-sm text-muted-foreground">
+                Showing <span className="font-medium text-foreground">{startItem}</span>–<span className="font-medium text-foreground">{endItem}</span> of{" "}
+                <span className="font-medium text-foreground">{totalCount}</span> leads
+              </p>
+
+              {/* Page Controls */}
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                  onClick={() => setCurrentPage(1)}
+                  disabled={currentPage === 1}
+                >
+                  <ChevronsLeft className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                  onClick={() => setCurrentPage(currentPage - 1)}
+                  disabled={currentPage === 1}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+
+                {getPageNumbers().map((page, idx) =>
+                  page === "ellipsis" ? (
+                    <span key={`ellipsis-${idx}`} className="px-1 text-muted-foreground">
+                      …
+                    </span>
+                  ) : (
+                    <Button
+                      key={page}
+                      variant={currentPage === page ? "default" : "ghost"}
+                      size="icon"
+                      className={`h-8 w-8 text-sm ${
+                        currentPage === page
+                          ? "bg-lime-400 text-slate-950 hover:bg-lime-300"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      onClick={() => setCurrentPage(page)}
+                    >
+                      {page}
+                    </Button>
+                  )
+                )}
+
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                  onClick={() => setCurrentPage(currentPage + 1)}
+                  disabled={currentPage === totalPages}
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={currentPage === totalPages}
+                >
+                  <ChevronsRight className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
