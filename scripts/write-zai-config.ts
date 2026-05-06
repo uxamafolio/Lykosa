@@ -20,6 +20,8 @@ function loadLocalEnv() {
 
     if (!process.env[key]) process.env[key] = value;
   }
+}
+
 loadLocalEnv();
 
 const baseUrl = process.env.ZAI_BASE_URL;
