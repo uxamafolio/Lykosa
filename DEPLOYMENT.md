@@ -43,7 +43,9 @@ ZAI_CHAT_ID=...
 ZAI_USER_ID=...
 ```
 
-Create the local SDK config before testing the hunter:
+Z.AI variables are only needed for optional enrichment/backfill. The scheduled Railway hunter can scrape Dubizzle without them.
+
+Create the local SDK config before testing enrichment:
 
 ```bash
 bun run zai:config
@@ -158,10 +160,11 @@ ZAI_CHAT_ID
 ZAI_USER_ID
 ```
 
+Z.AI variables are optional for the Railway cron unless you later enable enrichment in the one-shot worker.
+
 The Railway script runs:
 
 ```bash
-bun run zai:config
 bun run worker:hunter:once
 ```
 

@@ -481,96 +481,157 @@ export async function notifyListings(
   return sent ? batch.map((l) => l.id) : [];
 }
 
-// ─── Scraping: Web Search Fallback ───────────────────────────
+// ─── Scraping: Dubizzle Search Page ──────────────────────────
 
 /**
- * Scrape listings using z-ai-web-dev-sdk web_search.
- * This is the primary method since Dubizzle blocks direct Playwright access.
+ * Scrape listings from Dubizzle search pages.
+ * This intentionally avoids z-ai-web-dev-sdk web_search because public Z.AI
+ * chat API keys do not expose the SDK's /functions/invoke endpoint.
  */
 export async function scrapeWithWebSearch(): Promise<RawListing[]> {
-  console.log("  → Web Search: querying…");
-  const ZAI = (await import("z-ai-web-dev-sdk")).default;
-  const zai = await ZAI.create();
+  console.log("  → Dubizzle: fetching search pages…");
 
-  const queries = [
-    'site:dubai.dubizzle.com "direct from owner" apartment rent',
-    'site:dubai.dubizzle.com/en/property-for-rent/residential/apartmentflat owner 2026',
-    'dubai.dubizzle.com apartmentflat "direct from owner" AED yearly',
-    'site:dubizzle.com "direct from owner" apartment flat rent dubai 2026',
+  const urls = [
+    "https://dubai.dubizzle.com/en/property-for-rent/residential/apartmentflat/?is_owner=1",
+    "https://dubai.dubizzle.com/en/property-for-rent/residential/apartmentflat/",
   ];
 
-  const allRaw: { url: string; name: string; snippet: string }[] = [];
-  const queryErrors: string[] = [];
+  const candidates: RawListing[] = [];
+  const errors: string[] = [];
 
-  for (const q of queries) {
+  for (const url of urls) {
     try {
-      const results = await zai.functions.invoke("web_search", {
-        query: q,
-        num: 15,
+      const res = await fetch(url, {
+        headers: {
+          "accept": "text/html,application/xhtml+xml",
+          "accept-language": "en-US,en;q=0.9",
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        },
       });
-      for (const r of results) {
-        allRaw.push({
-          url: r.url || "",
-          name: r.name || "",
-          snippet: r.snippet || "",
-        });
+
+      if (!res.ok) {
+        throw new Error(`Dubizzle returned HTTP ${res.status}`);
       }
+
+      const html = await res.text();
+      candidates.push(...extractDubizzleListings(html));
     } catch (err) {
       const message = (err as Error).message;
-      queryErrors.push(message);
-      console.error(`  ❌ Web Search failed for query "${q}": ${message}`);
+      errors.push(`${url}: ${message}`);
+      console.error(`  ❌ Dubizzle fetch failed for ${url}: ${message}`);
     }
   }
 
-  if (allRaw.length === 0 && queryErrors.length > 0) {
+  if (candidates.length === 0 && errors.length > 0) {
     throw new Error(
-      `All web_search queries failed. First error: ${queryErrors[0]}`
+      `All Dubizzle fetches failed or returned no listings. First error: ${errors[0]}`
     );
+  }
+
+  if (candidates.length === 0) {
+    throw new Error("Dubizzle fetch succeeded but no listing URLs were parsed.");
   }
 
   const listings: RawListing[] = [];
   const seenUrls = new Set<string>();
 
-  for (const r of allRaw) {
-    if (!r.url || !r.name) continue;
-    if (!/\d{4}\/\d{1,2}\/\d{1,2}\//.test(r.url) || !r.url.includes("apartmentflat"))
-      continue;
-
-    let url = r.url.startsWith("http") ? r.url : `https://dubai.dubizzle.com${r.url}`;
-    url = url
-      .replace(/^https:\/\/www\.dubizzle\.com\//, "https://dubai.dubizzle.com/")
-      .replace(/^https:\/\/uae\.dubizzle\.com\//, "https://dubai.dubizzle.com/");
-    if (!url.includes("/en/")) {
-      url = url.replace(
-        "dubai.dubizzle.com/property-for-rent",
-        "dubai.dubizzle.com/en/property-for-rent"
-      );
-    }
-
-    if (seenUrls.has(url)) continue;
-    seenUrls.add(url);
-
-    let title = r.name
-      // Remove trailing site branding
-      .replace(/\s*[|–—]\s*(dubizzle|dubizzle Dubai|dubizzle Dubai Classifieds)\s*$/i, "")
-      // Remove leading type prefix like "Apartment: " or "Apartment Flat: "
-      .replace(/^(Apartment\s*Flat?|Studio|Villa|Townhouse|Penthouse)\s*:\s*/i, "")
-      .trim();
-
-    const price = extractPriceFromSnippet(r.snippet) || extractPriceFromTitle(title);
-
-    // Try to extract source date from URL like /2026/3/28/
-    const dateMatch = r.url.match(/\/(\d{4})\/(\d{1,2})\/(\d{1,2})\//);
-    let sourceListedAt: Date | undefined;
-    if (dateMatch) {
-      const [, y, m, d] = dateMatch.map(Number);
-      sourceListedAt = new Date(y, m - 1, d);
-    }
-
-    listings.push({ title, url, price, source: "dubizzle", sourceListedAt });
+  for (const listing of candidates) {
+    if (seenUrls.has(listing.url)) continue;
+    seenUrls.add(listing.url);
+    listings.push(listing);
   }
 
   return listings;
+}
+
+function extractDubizzleListings(html: string): RawListing[] {
+  const normalized = html
+    .replace(/\\u002F/g, "/")
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/g, "&");
+  const urlPattern =
+    /(?:href=["']|["'])((?:https:\/\/dubai\.dubizzle\.com)?\/en\/property-for-rent\/residential\/apartmentflat\/\d{4}\/\d{1,2}\/\d{1,2}\/[^"'<>\s\\]+)(?:["'])/g;
+
+  const listings: RawListing[] = [];
+  const seen = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  while ((match = urlPattern.exec(normalized))) {
+    const rawPath = match[1];
+    const url = rawPath.startsWith("http")
+      ? rawPath
+      : `https://dubai.dubizzle.com${rawPath}`;
+    const cleanUrl = url.split("?")[0];
+
+    if (seen.has(cleanUrl)) continue;
+    seen.add(cleanUrl);
+
+    const context = stripHtml(
+      normalized.slice(Math.max(0, match.index - 1400), match.index + 2200)
+    );
+    const title =
+      extractTitleFromContext(context) || titleFromDubizzleUrl(cleanUrl);
+    const price =
+      extractPriceFromSnippet(context) || extractPriceFromTitle(title);
+    const dateMatch = cleanUrl.match(/\/(\d{4})\/(\d{1,2})\/(\d{1,2})\//);
+    const sourceListedAt = dateMatch
+      ? new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]))
+      : undefined;
+
+    listings.push({
+      title,
+      url: cleanUrl,
+      price,
+      source: "dubizzle",
+      sourceListedAt,
+    });
+  }
+
+  return listings;
+}
+
+function stripHtml(value: string): string {
+  return decodeHtml(
+    value
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
+}
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function extractTitleFromContext(context: string): string {
+  const afterPrice = context.match(
+    /AED\.?\s*[\d,]+(?:\s*Yearly|\s*\/\s*Yearly)?\s*(?:Apartment|Studio)?\s*(.{12,140}?)(?:\s+(?:Email|Call|WhatsApp|PREMIUM|Verified)\b|$)/i
+  );
+  if (afterPrice?.[1]) {
+    return afterPrice[1].replace(/\s+/g, " ").trim();
+  }
+
+  return "";
+}
+
+function titleFromDubizzleUrl(url: string): string {
+  const parts = url.split("/").filter(Boolean);
+  const slug = parts[parts.length - 1] || "Dubizzle apartment listing";
+  return slug
+    .replace(/-\d+$/g, "")
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
 }
 
 // ─── Price Extraction Helpers ─────────────────────────────────

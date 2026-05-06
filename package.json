@@ -8,7 +8,7 @@
     "start": "NODE_ENV=production bun .next/standalone/server.js",
     "worker:hunter": "bun mini-services/dubizzle-monitor/index.ts",
     "worker:hunter:once": "bun scripts/hunter-once.ts",
-    "worker:hunter:railway": "bun run zai:config && bun run worker:hunter:once",
+    "worker:hunter:railway": "bun run worker:hunter:once",
     "zai:config": "bun scripts/write-zai-config.ts",
     "lint": "eslint .",
     "db:push": "prisma db push",
