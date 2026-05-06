@@ -339,10 +339,16 @@ export default function LykosaDashboard() {
           </nav>
 
           <div className="flex items-center gap-3">
-            {(hunterStatus?.status === "running" || hunterStatus?.status === "scheduled") && (
+            {(hunterStatus?.status === "running" ||
+              hunterStatus?.status === "scheduled" ||
+              hunterStatus?.status === "database_error") && (
               <Badge className="bg-green-500/15 text-green-400 border-green-500/30">
                 <span className="mr-1.5 h-2 w-2 rounded-full bg-green-400 animate-pulse inline-block" />
-                {hunterStatus.status === "scheduled" ? "Hunter Scheduled" : "Hunter Live"}
+                {hunterStatus.status === "database_error"
+                  ? "DB Config Needed"
+                  : hunterStatus.status === "scheduled"
+                    ? "Hunter Scheduled"
+                    : "Hunter Live"}
               </Badge>
             )}
             <Button
@@ -474,6 +480,8 @@ export default function LykosaDashboard() {
               ? `🟢 Hunter Active — Cycle #${hunterStatus.uptime?.totalCycles ?? 0}`
               : hunterStatus?.status === "scheduled"
                 ? "🟢 Hunter Scheduled — GitHub Actions"
+                : hunterStatus?.status === "database_error"
+                  ? "🟡 Hunter Scheduled — DB config needed"
                 : "⚫ Hunter Offline"}
           </span>
         </div>
@@ -1019,6 +1027,7 @@ function HunterTab({ status, onEnrich, enriching }: { status: HunterStatus | nul
 
   const isRunning = status.status === "running";
   const isScheduled = status.status === "scheduled";
+  const hasDatabaseError = status.status === "database_error";
 
   return (
     <div className="space-y-6">
@@ -1037,11 +1046,21 @@ function HunterTab({ status, onEnrich, enriching }: { status: HunterStatus | nul
               <div className="flex items-center gap-2">
                 <span
                   className={`h-2.5 w-2.5 rounded-full ${
-                    isRunning || isScheduled ? "bg-green-400 animate-pulse" : "bg-red-400"
+                    isRunning || isScheduled
+                      ? "bg-green-400 animate-pulse"
+                      : hasDatabaseError
+                        ? "bg-yellow-400"
+                        : "bg-red-400"
                   }`}
                 />
                 <span className="text-sm font-medium">
-                  {isRunning ? "Running" : isScheduled ? "Scheduled" : "Offline"}
+                  {isRunning
+                    ? "Running"
+                    : isScheduled
+                      ? "Scheduled"
+                      : hasDatabaseError
+                        ? "DB Config Needed"
+                        : "Offline"}
                 </span>
               </div>
             </div>
@@ -1080,7 +1099,12 @@ function HunterTab({ status, onEnrich, enriching }: { status: HunterStatus | nul
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {isScheduled ? (
+          {hasDatabaseError ? (
+            <p className="text-sm text-yellow-400">
+              Railway cron is separate from Vercel. Vercel cannot read Supabase yet;
+              check the Vercel `DATABASE_URL` variable.
+            </p>
+          ) : isScheduled ? (
             <p className="text-sm text-muted-foreground">
               GitHub Actions runs the hunter on schedule.
               {status.lastListingAt

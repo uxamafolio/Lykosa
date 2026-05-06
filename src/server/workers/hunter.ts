@@ -500,6 +500,8 @@ export async function scrapeWithWebSearch(): Promise<RawListing[]> {
   ];
 
   const allRaw: { url: string; name: string; snippet: string }[] = [];
+  const queryErrors: string[] = [];
+
   for (const q of queries) {
     try {
       const results = await zai.functions.invoke("web_search", {
@@ -513,9 +515,17 @@ export async function scrapeWithWebSearch(): Promise<RawListing[]> {
           snippet: r.snippet || "",
         });
       }
-    } catch {
-      /* skip failed queries */
+    } catch (err) {
+      const message = (err as Error).message;
+      queryErrors.push(message);
+      console.error(`  ❌ Web Search failed for query "${q}": ${message}`);
     }
+  }
+
+  if (allRaw.length === 0 && queryErrors.length > 0) {
+    throw new Error(
+      `All web_search queries failed. First error: ${queryErrors[0]}`
+    );
   }
 
   const listings: RawListing[] = [];

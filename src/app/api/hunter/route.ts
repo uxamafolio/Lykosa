@@ -51,11 +51,36 @@ export async function GET() {
     console.error("GET /api/hunter error:", error);
     return NextResponse.json(
       {
-        status: "error",
-        message: "Hunter status unavailable",
+        status: "database_error",
+        service: "railway-hunter-cron",
+        message:
+          "Hunter is scheduled on Railway, but Vercel cannot read Supabase. Check Vercel DATABASE_URL.",
         error: error.code || error.message,
+        database: {
+          totalListings: 0,
+          newListings: 0,
+          sentListings: 0,
+        },
+        config: {
+          scrapeIntervalMin: Number.parseInt(
+            process.env.HUNTER_SCHEDULE_MINUTES || "15",
+            10
+          ),
+          notifyMode: "ALL",
+          agentThreshold: 60,
+          telegramConfigured: !!(
+            process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
+          ),
+        },
+        lastCycle: null,
+        lastListingAt: null,
+        nextCycle: null,
+        uptime: {
+          totalCycles: 0,
+          totalNewListings: 0,
+        },
       },
-      { status: 500 }
+      { status: 200 }
     );
   }
 }
