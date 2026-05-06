@@ -1,11 +1,13 @@
 # Lykosa Free Deployment
 
-Recommended $0 setup:
+Recommended low-cost setup:
 
 - Vercel Hobby for the Next.js dashboard and API routes
 - Supabase Free for Postgres
-- GitHub Actions schedule for the hunter job
+- Railway Cron for the hunter job if GitHub Actions credits are exhausted
 - Telegram Bot API for lead alerts
+
+Railway is not fully free forever. Railway's current free plan includes a small monthly resource credit, and new users may get trial credits. Keep the hunter as a cron job, not an always-on worker, to minimize usage.
 
 ## 1. Supabase
 
@@ -119,9 +121,29 @@ Optional health check path:
 /api/health
 ```
 
-## 5. GitHub Actions Hunter Schedule
+## 5. Railway Hunter Cron
 
-Add these GitHub repository secrets:
+Create a new Railway service from the same GitHub repo.
+
+In the Railway service settings, set the custom config path to:
+
+```text
+/railway.hunter.json
+```
+
+This config runs:
+
+```bash
+bun run worker:hunter:railway
+```
+
+on this cron schedule:
+
+```text
+*/15 * * * *
+```
+
+Add these Railway service variables:
 
 ```bash
 DATABASE_URL
@@ -134,24 +156,24 @@ ZAI_CHAT_ID
 ZAI_USER_ID
 ```
 
-The scheduled workflow runs:
+The Railway script runs:
 
 ```bash
 bun run zai:config
 bun run worker:hunter:once
 ```
 
-It runs one hunter cycle, saves listings to Supabase, sends Telegram alerts, then exits. The schedule is defined in `.github/workflows/hunter.yml`.
+It runs one hunter cycle, saves listings to Supabase, sends Telegram alerts, and exits. This is important because Railway cron skips the next run if the previous execution is still active.
 
-The current schedule is every 15 minutes:
+You can also configure the cron manually in Railway dashboard:
 
-```yaml
-cron: "*/15 * * * *"
-```
+- Start command: `bun run worker:hunter:railway`
+- Cron schedule: `*/15 * * * *`
+- Restart policy: `Never`
 
-## 6. GitHub Actions CI
+## 6. GitHub Actions Optional CI
 
-The CI workflow checks the project on pushes and PRs:
+If GitHub Actions credits are available, the CI workflow can check the project on pushes and PRs:
 
 ```bash
 bun run lint
@@ -159,7 +181,7 @@ bunx tsc --noEmit
 bun run build
 ```
 
-Vercel can deploy automatically from GitHub after the branch updates.
+If credits are exhausted, disable `.github/workflows/hunter.yml` and keep only Railway cron for the hunter.
 
 ## Security Note
 

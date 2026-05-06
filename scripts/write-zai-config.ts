@@ -22,6 +22,7 @@ function loadLocalEnv() {
   }
 }
 
+
 loadLocalEnv();
 
 const baseUrl = process.env.ZAI_BASE_URL;
@@ -36,6 +37,7 @@ const config: Record<string, string> = {
   baseUrl,
   apiKey,
 };
+
 
 if (process.env.ZAI_CHAT_ID) config.chatId = process.env.ZAI_CHAT_ID;
 if (process.env.ZAI_USER_ID) config.userId = process.env.ZAI_USER_ID;
