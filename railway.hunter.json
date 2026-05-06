@@ -1,7 +1,8 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
-    "buildCommand": "bun run db:generate"
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile.hunter"
   },
   "deploy": {
     "startCommand": "bun run worker:hunter:railway",

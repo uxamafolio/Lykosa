@@ -1,0 +1,13 @@
+FROM oven/bun:1-slim
+
+WORKDIR /app
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY prisma ./prisma
+RUN bun run db:generate
+
+COPY . .
+
+CMD ["bun", "run", "worker:hunter:railway"]

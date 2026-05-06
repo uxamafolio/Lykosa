@@ -165,11 +165,15 @@ bun run worker:hunter:once
 
 It runs one hunter cycle, saves listings to Supabase, sends Telegram alerts, and exits. This is important because Railway cron skips the next run if the previous execution is still active.
 
+The hunter service uses `Dockerfile.hunter` instead of Railpack. This avoids Railway's `mise` tool install step, which can be slow or get canceled while downloading Bun/Node.
+
 You can also configure the cron manually in Railway dashboard:
 
 - Start command: `bun run worker:hunter:railway`
 - Cron schedule: `*/15 * * * *`
 - Restart policy: `Never`
+- Builder: `Dockerfile`
+- Dockerfile path: `Dockerfile.hunter`
 
 ## 6. GitHub Actions Optional CI
 
