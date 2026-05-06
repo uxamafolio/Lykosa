@@ -60,6 +60,10 @@ function parseBlacklistKeywords(value: string | null | undefined): string[] {
   }
 }
 
+function getZaiModel(): string {
+  return process.env.ZAI_MODEL || "glm-4.7-flash";
+}
+
 // ─── Jitter Logic (PRD §4.1 — Adaptive Cron with Jitter) ─────
 
 /**
@@ -812,6 +816,7 @@ export async function enrichTopLeads(
       // Use LLM to extract structured data from snippets
       const allText = snippets.join("\n");
       const completion = await zai.chat.completions.create({
+        model: getZaiModel(),
         messages: [
           {
             role: "assistant",
@@ -969,6 +974,7 @@ export async function backfillListings(db: PrismaClient): Promise<number> {
       // LLM extraction
       const allText = snippets.join("\n");
       const completion = await zai.chat.completions.create({
+        model: getZaiModel(),
         messages: [
           {
             role: "assistant",
